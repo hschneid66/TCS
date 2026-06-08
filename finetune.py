@@ -455,7 +455,7 @@ def main() -> None:
         wait_for_first_iteration_to_start_sec=1,
         max_wait_for_first_iteration_to_start_sec=1,
     )
-    task = Task.init(project_name="Finetune", task_name="Finetune", output_uri=True)
+    task = Task.init(project_name="TCS", task_name="Finetune", output_uri=True)
 
     if Task.running_locally():  # bind dataview to task when running locally for visibility
         dv = DataView(auto_connect_with_task=True)
