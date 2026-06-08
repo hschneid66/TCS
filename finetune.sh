@@ -2,7 +2,7 @@
 
 pip install transformers peft accelerate datasets sentencepiece torch
 python finetune.py --dataset-id "dcba845f3369456a8d8befce12f55f80" --version-id "cfba2dff7cbe4d6fbabfdfc84c3c3699" \
-    --model Qwen/Qwen2.5-7B-Instruct \
+    --model Qwen/Qwen2.5-3B-Instruct \
     --batch-size 4 \
     --gradient-accumulation 4 \
     --max-length 1024 \
