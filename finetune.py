@@ -34,33 +34,14 @@ try:
     from transformers import (
         AutoModelForCausalLM,
         AutoTokenizer,
+        DataCollatorForSeq2Seq,
         Trainer,
         TrainingArguments,
-        default_data_collator,
     )
     from transformers.trainer_utils import set_seed
     from peft import LoraConfig, get_peft_model
 except ImportError:
     IterableDataset = object  # torch not installed (thin client that only enqueues remotely)
-
-
-#if not Task.running_locally() or TYPE_CHECKING:
-#    import torch
-#    import torch.distributed as dist
-#    import torch.multiprocessing as mp
-#    from torch.utils.data import IterableDataset
-
-#    from transformers import (
-#        AutoModelForCausalLM,
-#        AutoTokenizer,
-#        Trainer,
-#        TrainingArguments,
-#        default_data_collator,
-#    )
-#    from transformers.trainer_utils import set_seed
-#    from peft import LoraConfig, get_peft_model
-#else:
-#    IterableDataset = object  # handle case in which torch is not installed locally
 
 
 class QADataSubEntry(DataSubEntry):
@@ -143,7 +124,7 @@ class QALoraIterableDataset(IterableDataset):
             cache_in_memory=True
         )
 
-    def __iter__(self) -> Iterable[Dict[str, torch.Tensor]]:
+    def __iter__(self) -> Iterable[Dict[str, list]]:
         for entry in self._dataview_iterator:
             if not isinstance(entry, QADataEntry):
                 continue
@@ -152,21 +133,23 @@ class QALoraIterableDataset(IterableDataset):
                 question=qa_entry.question,
                 answer=qa_entry.answer,
             )
+            # No padding here: emit variable-length sequences and let the
+            # data collator pad each batch to its own longest sample. This
+            # avoids running the forward/backward pass over ~1024 pad tokens
+            # for every short Q&A pair.
             encoding = self._tokenizer(
                 prompt,
                 truncation=True,
                 max_length=self._max_length,
-                padding="max_length",
-                return_tensors="pt",
             )
-            input_ids = encoding["input_ids"].squeeze(0)
-            attention_mask = encoding["attention_mask"].squeeze(0)
-            labels = input_ids.clone()
-            labels[attention_mask == 0] = self._label_pad_token_id
+            input_ids = encoding["input_ids"]
+            attention_mask = encoding["attention_mask"]
+            # Labels mirror input_ids; the collator replaces pad positions
+            # with label_pad_token_id (-100) so they're ignored in the loss.
             yield {
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
-                "labels": labels,
+                "labels": list(input_ids),
             }
 
 
@@ -210,7 +193,7 @@ class _LimitedIterableDataset(IterableDataset):
         self._dataset = dataset
         self._max_items = max_items
 
-    def __iter__(self) -> Iterable[Dict[str, torch.Tensor]]:
+    def __iter__(self) -> Iterable[Dict[str, list]]:
         if self._max_items is None:
             yield from self._dataset
             return
@@ -379,6 +362,15 @@ def _trainer_process_entry(
 
     train_dataset, eval_dataset_obj = _build_datasets(args, tokenizer, query_kwargs, eval_query_kwargs)
 
+    # Dynamically pad each batch to its longest sample instead of a fixed
+    # max_length. pad_to_multiple_of=8 keeps tensor-core-friendly shapes under
+    # fp16/bf16. This is the main GPU-utilization win for short Q&A sequences.
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer,
+        label_pad_token_id=-100,
+        pad_to_multiple_of=8,
+    )
+
     default_output_dir = args.output_dir or os.path.join("outputs", task_id)
     if global_rank == 0:
         os.makedirs(default_output_dir, exist_ok=True)
@@ -415,7 +407,7 @@ def _trainer_process_entry(
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset_obj,
-        data_collator=default_data_collator,
+        data_collator=data_collator,
     )
 
     train_result = trainer.train()
@@ -515,4 +507,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
